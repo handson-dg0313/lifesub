@@ -54,8 +54,8 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
-          ./gradlew :member:sonar \
-            -Dsonar.projectKey=lifesub-member-${{ env.teamid }} \
+          ./gradlew :member:sonar \${{ env.teamid }}
+            -Dsonar.projectKey=lifesub-member- \
             -Dsonar.projectName=lifesub-member-${{ env.teamid }} \
             -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
             -Dsonar.token=${{ secrets.SONAR_TOKEN }} \
