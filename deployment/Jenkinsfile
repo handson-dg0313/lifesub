@@ -17,6 +17,7 @@ podTemplate(
                         command: 'cat',
                         envVars: [
                             envVar(key: 'DOCKER_HOST', value: 'unix:///run/podman/podman.sock'),
+                            envVar(key: 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', value: '/run/podman/podman.sock'),
                             envVar(key: 'TESTCONTAINERS_RYUK_DISABLED', value: 'true')  //testcontailners 도커 소켓 오버라이드가 없는데,,?
                         ]),
         //containerTemplate(name: 'azure-cli', image: 'mcr.microsoft.com/azure-cli', command: 'cat', ttyEnabled: true),
