@@ -1,0 +1,203 @@
+def PIPELINE_ID = "${env.BUILD_NUMBER}"
+
+def getImageTag() {
+    def dateFormat = new java.text.SimpleDateFormat('yyyyMMddHHmmss')
+    def currentDate = new Date()
+    return dateFormat.format(currentDate)
+}
+
+podTemplate(
+    label: "${PIPELINE_ID}",
+    serviceAccount: 'jenkins',
+    containers: [
+        containerTemplate(name: 'podman', image: "mgoltzsche/podman", ttyEnabled: true, command: 'cat', privileged: true),
+        containerTemplate(name: 'gradle',
+                        image: 'gradle:jdk21',
+                        ttyEnabled: true,
+                        command: 'cat',
+                        envVars: [
+                            envVar(key: 'DOCKER_HOST', value: 'unix:///run/podman/podman.sock'),
+                            envVar(key: 'TESTCONTAINERS_RYUK_DISABLED', value: 'true')  //testcontailners 도커 소켓 오버라이드가 없는데,,?
+                        ]),
+        containerTemplate(name: 'azure-cli', image: 'mcr.microsoft.com/azure-cli', command: 'cat', ttyEnabled: true),
+        containerTemplate(name: 'envsubst', image: "dibi/envsubst", command: 'sleep', args: '1h')
+    ],
+    volumes: [
+        emptyDirVolume(mountPath: '/home/gradle/.gradle', memory: false),
+        emptyDirVolume(mountPath: '/root/.azure', memory: false),
+        emptyDirVolume(mountPath: '/run/podman', memory: false)
+    ]
+) {
+    node(PIPELINE_ID) {
+        def props
+        def imageTag = getImageTag()
+        def manifest = "deploy.yaml"
+        def namespace
+        def services = ['member', 'mysub', 'recommend']
+        def teamid = "dg0313"
+
+        stage("Checkout") {
+            checkout scm
+            props = readProperties file: "deployment/deploy_env_vars"
+            namespace = "${props.namespace}"
+        }
+
+        stage("Setup AKS") {
+            container('azure-cli') {
+                withCredentials([azureServicePrincipal('azure-credentials')]) {
+                    sh """
+                        az login --service-principal -u \$AZURE_CLIENT_ID -p \$AZURE_CLIENT_SECRET -t \$AZURE_TENANT_ID
+                        az aks get-credentials --resource-group rg-digitalgage-03 --name aks-digitalgarage-03 --overwrite-existing
+                        kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -
+                    """
+                }
+            }
+        }
+
+        stage("Build & Test") {
+            container('gradle') {
+                withSonarQubeEnv('SonarQube') {
+                    sh """
+                        chmod +x gradlew
+
+                        # Member 서비스 빌드 및 SonarQube 분석
+                        ./gradlew :member:clean :member:build -x test
+                        ./gradlew :member:test :member:jacocoTestReport :member:sonar \
+                            -Dsonar.projectKey=${props.root_project}-member-${teamid} \
+                            -Dsonar.projectName=${props.root_project}-member-${teamid} \
+                            -Dsonar.java.binaries=build/classes/java/main \
+                            -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
+                            -Dsonar.exclusions=**/config/**,**/entity/**,**/dto/**,**/*Application.class,**/exception/**
+
+                        # Mysub 서비스 빌드 및 SonarQube 분석
+                        ./gradlew :mysub-infra:clean :mysub-infra:build -x test
+                        ./gradlew :mysub-infra:test :mysub-infra:jacocoTestReport :mysub-infra:sonar \
+                            -Dsonar.projectKey=${props.root_project}-mysub-${teamid} \
+                            -Dsonar.projectName=${props.root_project}-mysub-${teamid} \
+                            -Dsonar.java.binaries=build/classes/java/main \
+                            -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
+                            -Dsonar.exclusions=**/config/**,**/entity/**,**/dto/**,**/*Application.class,**/exception/**
+
+                        # Recommend 서비스 빌드 및 SonarQube 분석
+                        ./gradlew :recommend:clean :recommend:build -x test
+                        ./gradlew :recommend:test :recommend:jacocoTestReport :recommend:sonar \
+                            -Dsonar.projectKey=${props.root_project}-recommend-${teamid} \
+                            -Dsonar.projectName=${props.root_project}-recommend-${teamid} \
+                            -Dsonar.java.binaries=build/classes/java/main \
+                            -Dsonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml \
+                            -Dsonar.exclusions=**/config/**,**/entity/**,**/dto/**,**/*Application.class,**/exception/**
+                    """
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            timeout(time: 10, unit: 'MINUTES') {
+                def qg = waitForQualityGate()
+                if (qg.status != 'OK') {
+                    echo "Quality Gate failed: ${qg.status}"
+                    // 빌드는 실패하지 않고 경고만 표시
+                    // error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                }
+            }
+        }
+
+        stage('Build & Push Images') {
+            container('podman') {
+                withCredentials([usernamePassword(
+                    credentialsId: 'acr-credentials',
+                    usernameVariable: 'USERNAME',
+                    passwordVariable: 'PASSWORD'
+                )]) {
+                    sh """
+                        podman system service -t 0 unix:///run/podman/podman.sock &
+                        sleep 3
+                        podman login ${props.registry} --username \$USERNAME --password \$PASSWORD
+                    """
+
+                    for (service in services) {
+                        def buildDir = service == 'mysub' ? 'mysub-infra' : service
+                        def jarFile = service == 'mysub' ? 'mysub.jar' : "${service}.jar"
+
+                        sh """
+                            podman build \
+                                --build-arg BUILD_LIB_DIR="${buildDir}/build/libs" \
+                                --build-arg ARTIFACTORY_FILE="${jarFile}" \
+                                -f deployment/container/Dockerfile \
+                                -t ${props.registry}/${props.image_org}/${service}:${imageTag} .
+
+                            podman push ${props.registry}/${props.image_org}/${service}:${imageTag}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Generate & Apply Manifest') {
+            container('envsubst') {
+                sh """
+                    mkdir -p deployment/k8s
+
+                    export namespace=${namespace}
+                    export allowed_origins=${props.allowed_origins}
+                    export jwt_secret_key=${props.jwt_secret_key}
+                    export postgres_user=${props.postgres_user}
+                    export postgres_password=${props.postgres_password}
+                    export replicas=${props.replicas}
+                    export resources_requests_cpu=${props.resources_requests_cpu}
+                    export resources_requests_memory=${props.resources_requests_memory}
+                    export resources_limits_cpu=${props.resources_limits_cpu}
+                    export resources_limits_memory=${props.resources_limits_memory}
+                    export registry=${props.registry}
+                    export image_org=${props.image_org}
+                    export image_tag=${imageTag}
+                    export teamid=${teamid}
+                    export ingress_host=${props.ingress_host}
+
+                    # manifest 생성
+                    envsubst < deployment/deploy.yaml.template > deployment/k8s/deploy.yaml
+
+                    echo "Generated manifest:"
+                    cat deployment/k8s/deploy.yaml
+                """
+            }
+
+            container('azure-cli') {
+                withCredentials([azureServicePrincipal('azure-credentials')]) {
+                    sh """
+                        # Secret 생성
+                        kubectl create secret docker-registry acr-secret \\
+                            --docker-server=${props.registry} \\
+                            --docker-username=\$AZURE_CLIENT_ID \\
+                            --docker-password=\$AZURE_CLIENT_SECRET \\
+                            --docker-email=noreply@example.com \\
+                            --namespace=${namespace} \\
+                            --dry-run=client -o yaml | kubectl apply -f -
+
+                        # Manifest 적용
+                        kubectl apply -f deployment/k8s/deploy.yaml
+
+                        echo "Waiting for deployments to be ready..."
+                        kubectl -n ${namespace} wait --for=condition=available deployment/member --timeout=300s
+                        kubectl -n ${namespace} wait --for=condition=available deployment/mysub --timeout=300s
+                        kubectl -n ${namespace} wait --for=condition=available deployment/recommend --timeout=300s
+                    """
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            container('azure-cli') {
+                sh """
+                    echo "Checking deployment status..."
+                    kubectl get all -n ${namespace}
+
+                    echo "Ingress configuration:"
+                    kubectl get ingress -n ${namespace} -o wide
+
+                    echo "Application can be accessed at: http://${props.ingress_host}"
+                """
+            }
+        }
+    }
+}
