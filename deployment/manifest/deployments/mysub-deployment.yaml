@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysub
+  labels:
+    app: mysub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysub
+  template:
+    metadata:
+      labels:
+        app: mysub
+    spec:
+      containers:
+      - name: mysub
+        image: acrdigitalgarage03.azurecr.io/dg0313/mysub:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        envFrom:
+        - configMapRef:
+            name: common-config
+        - configMapRef:
+            name: mysub-config
+        - secretRef:
+            name: common-secret
+        - secretRef:
+            name: mysub-secret
+        resources:
+          requests:
+            cpu: 256m
+            memory: 256Mi
+          limits:
+            cpu: 1024m
+            memory: 1024Mi
+        startupProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      imagePullSecrets:
+      - name: acr-secret
