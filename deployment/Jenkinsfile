@@ -19,8 +19,10 @@ podTemplate(
                             envVar(key: 'DOCKER_HOST', value: 'unix:///run/podman/podman.sock'),
                             envVar(key: 'TESTCONTAINERS_RYUK_DISABLED', value: 'true')  //testcontailners 도커 소켓 오버라이드가 없는데,,?
                         ]),
-        containerTemplate(name: 'azure-cli', image: 'mcr.microsoft.com/azure-cli', command: 'cat', ttyEnabled: true),
-        containerTemplate(name: 'envsubst', image: "dibi/envsubst", command: 'sleep', args: '1h')
+        //containerTemplate(name: 'azure-cli', image: 'mcr.microsoft.com/azure-cli', command: 'cat', ttyEnabled: true),
+        //containerTemplate(name: 'envsubst', image: "dibi/envsubst", command: 'sleep', args: '1h')
+        containerTemplate(name: 'azure-cli', image: 'hiondal/azure-kubectl:latest', command: 'cat', ttyEnabled: true),
+        containerTemplate(name: 'envsubst', image: "hiondal/envsubst", command: 'sleep', args: '1h')
     ],
     volumes: [
         emptyDirVolume(mountPath: '/home/gradle/.gradle', memory: false),
